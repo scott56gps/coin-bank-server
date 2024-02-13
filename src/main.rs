@@ -1,4 +1,6 @@
-use serde::Serialize;
+use std::sync::Mutex;
+
+use serde::{Serialize, Deserialize};
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 
@@ -15,9 +17,15 @@ struct Reserve {
     max_count: u8,
 }
 
+#[derive(Deserialize)]
+struct QueryData {
+    number: String,
+}
+
 struct AppState {
     app_name: String,
-    coin_bank_reserves: [Reserve; 4],
+    coin_bank_reserves: Mutex<Vec<u8>>,
+    // coin_bank_reserves: Mutex<Vec<Reserve>>,
 }
 
 #[get("/")]
@@ -26,30 +34,40 @@ async fn index(data: web::Data<AppState>) -> String {
     format!("Hello {app_name}!")
 }
 
-async fn total(data: web::Data<AppState>) -> impl Responder {
-    let reserves = &data.coin_bank_reserves;
-    let current_total: u8 = reserves
-        .iter()
-        .map(|reserve| match reserve.denomination.name.as_str() {
-            "Quarters" => 25 * reserve.current_count,
-            "Dimes" => 10 * reserve.current_count,
-            "Nickels" => 5 * reserve.current_count,
-            "Pennies" => 1 * reserve.current_count,
-            _ => 0,
-        })
-        .sum();
+#[get("/add")]
+async fn add_number(query_params: web::Query<QueryData>, data: web::Data<AppState>) -> impl Responder {
+    let mut reserves = data.coin_bank_reserves.lock().unwrap();
+    let number_to_add = query_params.into_inner().number.parse().expect("Not a valid number");
 
-    format!("{}", current_total as f32 * 0.01)
+    reserves.push(number_to_add);
+
+    format!("Current reserves: {:?}", reserves)
 }
 
-#[get("/reserves")]
-async fn get_reserves(data: web::Data<AppState>) -> [Reserve; 4] {
-    let reserves = data.coin_bank_reserves;
+// async fn total(data: web::Data<AppState>) -> impl Responder {
+//     let reserves = &data.coin_bank_reserves;
+//     let current_total: u8 = reserves
+//         .iter()
+//         .map(|reserve| match reserve.denomination.name.as_str() {
+//             "Quarters" => 25 * reserve.current_count,
+//             "Dimes" => 10 * reserve.current_count,
+//             "Nickels" => 5 * reserve.current_count,
+//             "Pennies" => 1 * reserve.current_count,
+//             _ => 0,
+//         })
+//         .sum();
 
-    let return_reserves = reserves;
+//     format!("{}", current_total as f32 * 0.01)
+// }
 
-    return_reserves
-}
+// #[get("/reserves")]
+// async fn get_reserves(data: web::Data<AppState>) -> impl Responder {
+//     let reserves = data.coin_bank_reserves.lock().unwrap();
+
+//     let return_reserves = reserves;
+
+//     return_reserves
+// }
 
 async fn manual_hello() -> impl Responder {
     HttpResponse::Ok().body("Hey there!")
@@ -92,18 +110,21 @@ async fn main() -> std::io::Result<()> {
         },
     ];
 
+    let temp_reserves = vec![1, 2, 3];
+
     let app_state = web::Data::new(AppState {
         app_name: String::from("Coin Changer Server"),
-        coin_bank_reserves: reserves,
+        coin_bank_reserves: Mutex::new(temp_reserves),
     });
 
-    HttpServer::new(|| {
+    HttpServer::new(move || {
         App::new()
-            .app_data(app_state)
+            .app_data(app_state.clone())
             .service(index)
-            .service(get_reserves)
+            // .service(get_reserves)
             .route("/hey", web::get().to(manual_hello))
-            .route("/total", web::get().to(total))
+            .service(add_number)
+            // .route("/total", web::get().to(total))
     })
     .bind(("127.0.0.1", 8080))?
     .run()
