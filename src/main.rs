@@ -1,16 +1,22 @@
 use std::sync::Mutex;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 
-#[derive(Serialize)]
+/* CONSTANTS */
+const QUARTERS_INDEX: usize = 0;
+const DIMES_INDEX: usize = 1;
+const NICKELS_INDEX: usize = 2;
+const PENNIES_INDEX: usize = 3;
+
+#[derive(Serialize, Debug)]
 struct Denomination {
     name: String,
     value: f32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct Reserve {
     denomination: Denomination,
     current_count: u8,
@@ -19,13 +25,29 @@ struct Reserve {
 
 #[derive(Deserialize)]
 struct QueryData {
-    number: String,
+    deno_name: String, // The name of the denomination to modify
+    count: String,     // The count of coins to modify
+}
+
+#[derive(Deserialize)]
+struct CoinRequestBody {
+    denomination: String,
+    count: u8,
+}
+
+#[derive(Serialize)]
+struct APIResponse {
+    message: Option<String>,
+}
+
+enum APIError {
+    AppStateLockBusy,
+    IllegalDenominationName,
 }
 
 struct AppState {
     app_name: String,
-    coin_bank_reserves: Mutex<Vec<u8>>,
-    // coin_bank_reserves: Mutex<Vec<Reserve>>,
+    coin_bank_reserves: Mutex<Vec<Reserve>>,
 }
 
 #[get("/")]
@@ -34,14 +56,41 @@ async fn index(data: web::Data<AppState>) -> String {
     format!("Hello {app_name}!")
 }
 
-#[get("/add")]
-async fn add_number(query_params: web::Query<QueryData>, data: web::Data<AppState>) -> impl Responder {
-    let mut reserves = data.coin_bank_reserves.lock().unwrap();
-    let number_to_add = query_params.into_inner().number.parse().expect("Not a valid number");
+fn get_coin_index(denomination: String) -> Option<usize> {
+    match denomination.to_lowercase().as_str() {
+        "quarter" => Some(QUARTERS_INDEX),
+        "dime" => Some(DIMES_INDEX),
+        "nickel" => Some(NICKELS_INDEX),
+        "penny" => Some(PENNIES_INDEX),
+        _ => None,
+    }
+}
 
-    reserves.push(number_to_add);
+#[post("/add_coin")]
+async fn add_coin(
+    request_body: web::Json<CoinRequestBody>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let denomination = &request_body.denomination;
+    let coin_index = match get_coin_index(denomination.to_string()) {
+        Some(coin_index) => coin_index,
+        None => return HttpResponse::NotAcceptable().json(APIResponse {
+            message: Some(format!("denomination name {} is not acceptable.  Acceptable values are 'quarter', 'dime', 'nickel' and 'penny'", request_body.denomination))})
+    };
 
-    format!("Current reserves: {:?}", reserves)
+    // Update the global mutable state with the new count of coins
+    let mut reserve_to_update = match data.coin_bank_reserves.lock() {
+        Ok(reserves) => reserves,
+        Err(_) => {
+            return HttpResponse::Locked().json(APIResponse {
+                message: Some("Application state data is locked".to_string()),
+            })
+        }
+    };
+
+    reserve_to_update[coin_index].current_count += request_body.count;
+
+    HttpResponse::Ok().json(&reserve_to_update[coin_index])
 }
 
 // async fn total(data: web::Data<AppState>) -> impl Responder {
@@ -75,7 +124,7 @@ async fn manual_hello() -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let reserves = [
+    let reserves = vec![
         Reserve {
             denomination: Denomination {
                 name: String::from("Quarters"),
@@ -95,7 +144,7 @@ async fn main() -> std::io::Result<()> {
         Reserve {
             denomination: Denomination {
                 name: String::from("Nickels"),
-                value: 0.05
+                value: 0.05,
             },
             current_count: 0,
             max_count: 15,
@@ -110,11 +159,9 @@ async fn main() -> std::io::Result<()> {
         },
     ];
 
-    let temp_reserves = vec![1, 2, 3];
-
     let app_state = web::Data::new(AppState {
         app_name: String::from("Coin Changer Server"),
-        coin_bank_reserves: Mutex::new(temp_reserves),
+        coin_bank_reserves: Mutex::new(reserves),
     });
 
     HttpServer::new(move || {
@@ -123,8 +170,8 @@ async fn main() -> std::io::Result<()> {
             .service(index)
             // .service(get_reserves)
             .route("/hey", web::get().to(manual_hello))
-            .service(add_number)
-            // .route("/total", web::get().to(total))
+            .service(add_coin)
+        // .route("/total", web::get().to(total))
     })
     .bind(("127.0.0.1", 8080))?
     .run()
