@@ -10,23 +10,17 @@ const DIMES_INDEX: usize = 1;
 const NICKELS_INDEX: usize = 2;
 const PENNIES_INDEX: usize = 3;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Clone, Debug)]
 struct Denomination {
     name: String,
     value: f32,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Clone, Debug)]
 struct Reserve {
     denomination: Denomination,
     current_count: u8,
     max_count: u8,
-}
-
-#[derive(Deserialize)]
-struct QueryData {
-    deno_name: String, // The name of the denomination to modify
-    count: String,     // The count of coins to modify
 }
 
 #[derive(Deserialize)]
@@ -40,11 +34,7 @@ struct APIResponse {
     message: Option<String>,
 }
 
-enum APIError {
-    AppStateLockBusy,
-    IllegalDenominationName,
-}
-
+#[derive(Serialize)]
 struct AppState {
     app_name: String,
     coin_bank_reserves: Mutex<Vec<Reserve>>,
@@ -54,6 +44,13 @@ struct AppState {
 async fn index(data: web::Data<AppState>) -> String {
     let app_name = &data.app_name;
     format!("Hello {app_name}!")
+}
+
+#[get("/reserves")]
+async fn get_reserves(data: web::Data<AppState>) -> impl Responder {
+    let reserves = data.coin_bank_reserves.lock().unwrap();
+
+    HttpResponse::Ok().json(reserves.to_vec())
 }
 
 fn get_coin_index(denomination: String) -> Option<usize> {
@@ -79,7 +76,7 @@ async fn add_coin(
     };
 
     // Update the global mutable state with the new count of coins
-    let mut reserve_to_update = match data.coin_bank_reserves.lock() {
+    let mut reserves = match data.coin_bank_reserves.lock() {
         Ok(reserves) => reserves,
         Err(_) => {
             return HttpResponse::Locked().json(APIResponse {
@@ -88,35 +85,44 @@ async fn add_coin(
         }
     };
 
-    reserve_to_update[coin_index].current_count += request_body.count;
+    match reserves[coin_index].max_count >= reserves[coin_index].current_count + request_body.count
+    {
+        true => reserves[coin_index].current_count += request_body.count,
+        false => reserves[coin_index].current_count = reserves[coin_index].max_count,
+    }
 
-    HttpResponse::Ok().json(&reserve_to_update[coin_index])
+    HttpResponse::Ok().json(&reserves[coin_index])
 }
 
-// async fn total(data: web::Data<AppState>) -> impl Responder {
-//     let reserves = &data.coin_bank_reserves;
-//     let current_total: u8 = reserves
-//         .iter()
-//         .map(|reserve| match reserve.denomination.name.as_str() {
-//             "Quarters" => 25 * reserve.current_count,
-//             "Dimes" => 10 * reserve.current_count,
-//             "Nickels" => 5 * reserve.current_count,
-//             "Pennies" => 1 * reserve.current_count,
-//             _ => 0,
-//         })
-//         .sum();
+#[post("/subtract_coin")]
+async fn subtract_coin(
+    request_body: web::Json<CoinRequestBody>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let denomination = &request_body.denomination;
+    let coin_index = match get_coin_index(denomination.to_string()) {
+        Some(coin_index) => coin_index,
+        None => return HttpResponse::NotAcceptable().json(APIResponse {
+            message: Some(format!("denomination name {} is not acceptable.  Acceptable values are 'quarter', 'dime', 'nickel' and 'penny'", request_body.denomination))})
+    };
 
-//     format!("{}", current_total as f32 * 0.01)
-// }
+    // Update the global mutable state with the new count of coins
+    let mut reserves = match data.coin_bank_reserves.lock() {
+        Ok(reserves) => reserves,
+        Err(_) => {
+            return HttpResponse::Locked().json(APIResponse {
+                message: Some("Application state data is locked".to_string()),
+            })
+        }
+    };
 
-// #[get("/reserves")]
-// async fn get_reserves(data: web::Data<AppState>) -> impl Responder {
-//     let reserves = data.coin_bank_reserves.lock().unwrap();
+    match reserves[coin_index].current_count > request_body.count {
+        true => reserves[coin_index].current_count -= request_body.count,
+        false => reserves[coin_index].current_count = 0,
+    }
 
-//     let return_reserves = reserves;
-
-//     return_reserves
-// }
+    HttpResponse::Ok().json(&reserves[coin_index])
+}
 
 async fn manual_hello() -> impl Responder {
     HttpResponse::Ok().body("Hey there!")
@@ -171,6 +177,7 @@ async fn main() -> std::io::Result<()> {
             // .service(get_reserves)
             .route("/hey", web::get().to(manual_hello))
             .service(add_coin)
+            .service(get_reserves)
         // .route("/total", web::get().to(total))
     })
     .bind(("127.0.0.1", 8080))?
